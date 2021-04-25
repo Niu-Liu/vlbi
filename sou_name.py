@@ -17,7 +17,7 @@ import os
 import time
 
 # My modules
-from .get_dir import get_data_dir
+from .get_dir import get_aux_dir
 
 
 __all__ = ["get_souname"]
@@ -37,7 +37,7 @@ def get_souname():
         different designations of radio source names
     """
 
-    datadir = get_data_dir()
+    datadir = get_aux_dir()
     datafil = "{}/source.names".format(datadir)
 
     # empty array to store data
