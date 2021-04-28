@@ -5,6 +5,10 @@
 Created on Sat Sep 15 14:38:46 2018
 
 @author: Neo(liuniu@smail.nju.edu.cn)
+
+Format for the .crf file
+IERS ICRS-PC format: https://ivscc.gsfc.nasa.gov/products-data/crf-format.txt.
+
 """
 
 from astropy.table import Table, join, unique, Column
@@ -22,7 +26,7 @@ from .convert_func import RA_conv, DC_conv, date2mjd
 from .pos_err import pos_err_calc
 from .sou_name import get_souname
 
-__all__ = ["read_sou", "read_crf", "read_cat"]
+__all__ = ["read_sou", "read_opa_crf", "read_cat"]
 
 
 # -----------------------------  FUNCTIONS -----------------------------
@@ -40,9 +44,76 @@ def inflate_sou_err(err, scale=1.5, noise=0.03):
         inflated formal error
     """
 
-    err1 = np.sqrt((err * scale)**2 + noise**2)
+    err = np.sqrt((err * scale)**2 + noise**2)
 
-    return err1
+    return err
+
+
+def drop_sou_with_few_obs(t_sou, nobs_lim=3, verbose=True):
+    """Drop sources with few observations
+
+    Parameters
+    ----------
+    t_sou : Astropy.table.Table object
+        catalog
+    nobs_lim : int
+        least number of observation, meaningful only if drop_few_obs is True.
+
+    Return
+    ------
+    A new catalog
+    """
+
+    # NO. sources in the original solution
+    N0 = len(t_sou)
+
+    # Remove source with few observation used in the solution
+    mask = (t_sou["used_obs"] >= nobs_lim)
+    t_sou = Table(t_sou[mask], masked=False)
+
+    # No. sources after elimination
+    N1 = len(t_sou)
+
+    if verbose:
+        print("There are {:d} sources in the original catalog, "
+              "{:d} ({:.0f}%) sources with #obs < {:.0f} dropped, leaving "
+              "{:d} sources in the present catalog.".format(
+                  N0, N0-N1, (N0-N1)/N0*100, nobs_lim, N1))
+
+    return t_sou
+
+
+def add_unit(t_sou, table_type="sou"):
+    """Add unit information, work for .sou, .crf, and .cat file
+    """
+
+    if table_type in ["sou", "cat"]:
+        t_sou["ra"].unit = u.deg
+        t_sou["dec"].unit = u.deg
+
+    if table_type in ["crf"]:
+        t_sou["ra_err"] = t_sou["ra_err"] * 15 * 3.6e6  # second -> mas
+        t_sou["dec_err"] = t_sou["dec_err"] * 3.6e6
+
+    t_sou["ra_err"].unit = u.mas
+    t_sou["dec_err"].unit = u.mas
+
+    t_sou["beg_epoch"].unit = cds.MJD
+    t_sou["end_epoch"].unit = cds.MJD
+    if "mean_epoch" in t_sou.colnames:
+        t_sou["mean_epoch"].unit = cds.MJD
+
+    return t_sou
+
+
+def ra_err_corr(t_sou):
+    """Multipliy the formal error in R.A. by a factor of cos(Decl.)
+    """
+
+    factor = np.cos(Angle(t_sou["dec"]).radian)
+    t_sou["ra_err"] = t_sou["ra_err"] * factor
+
+    return t_sou
 
 
 def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
@@ -54,8 +125,7 @@ def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
         the full path of .sou file
     drop_few_obs : boolean
         flag to determine whether to remove sources with few observations
-    nobs_lim : int
-        least number of observation, meaningful only if drop_few_obs is True.
+
     flate_err : boolean
         flag to determine whether to inflate the formal error
 
@@ -89,8 +159,6 @@ def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
             epoch of first observation (MJD)
         -- end_epoch
             epoch of last observation (MJD)
-
-
     """
 
     if not os.path.isfile(sou_file):
@@ -107,29 +175,13 @@ def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
                                  139, 155, 170, 191, 212))
 
     ra_dec_table = Table.read(sou_file, format="ascii.fixed_width_no_header",
-                              names=["ra", "dec", "used_obs", ],
+                              names=["ra", "dec", "used_obs"],
                               col_starts=[20, 57, 117],
                               col_ends=[41, 78, 122])
 
     if drop_few_obs:
-
-        # NO. sources in the original solution
-        N0 = len(t_sou)
-
-        # Remove source with few observation used in the solution
-        mask = (t_sou["used_obs"] >= nobs_lim)
-        t_sou = Table(t_sou[mask], masked=False)
-
-        # No. sources after elimination
-        N1 = len(t_sou)
-
-        mask = (ra_dec_table["used_obs"] >= nobs_lim)
-        ra_dec_table = Table(ra_dec_table[mask], masked=False)
-
-        print("There are {:d} sources in the original catalog, "
-              "{:d} ({:.0f}%) sources with #obs < {:.0f} dropped, leaving "
-              "{:d} sources in the present catalog.".format(
-                  N0, N0-N1, (N0-N1)/N0*100, nobs_lim, N1))
+        t_sou = drop_sou_with_few_obs(t_sou, nobs_lim)
+        ra_dec_table = drop_sou_with_few_obs(ra_dec_table, nobs_lim, verbose=False)
 
     # convert string into float for RA, Decl. and observing epoch
     Nsize = len(t_sou)
@@ -157,16 +209,10 @@ def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
     t_sou["end_epoch"] = date_end
 
     # Add unit information
-    t_sou["ra"].unit = u.deg
-    t_sou["dec"].unit = u.deg
-    t_sou["ra_err"].unit = u.mas
-    t_sou["dec_err"].unit = u.mas
-    t_sou["beg_epoch"].unit = cds.MJD
-    t_sou["end_epoch"].unit = cds.MJD
+    t_sou = add_unit(t_sou, "sou")
 
     # Multipliy the formal error in R.A. by a factor of cos(Decl.)
-    factor = np.cos(Angle(t_sou["dec"]).radian)
-    t_sou["ra_err"] = t_sou["ra_err"] * factor
+    t_sou = ra_err_corr(t_sou)
 
     # Inflate the formal error
     if flate_err:
@@ -179,11 +225,10 @@ def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
 
     # Add the semi-major axis of error ellipse to the table
     t_sou.add_column(pos_err, name="pos_err", index=6)
-    t_sou["pos_err"].unit = u.mas
 
     # Add IERS and ICRF designations of source names
-    tsouname = get_souname()
-    t_sou = join(tsouname, t_sou, keys="ivs_name", join_type="right")
+    t_souname = get_souname()
+    t_sou = join(t_souname, t_sou, keys="ivs_name", join_type="right")
 
     # Fill the empty filed of IERS name by the IVS name
     for i in t_sou["iers_name"].mask.nonzero()[0]:
@@ -192,13 +237,112 @@ def read_sou(sou_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
     return t_sou
 
 
-def read_crf(crf_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
-    """Read radio source positions
+def read_asi_crf(crf_file):
+    """Read radio source positions in .crf file from ASI
 
     Parameters
     ----------
     crf_file : string
         the full path of .cat file
+
+    Return
+    ------
+    t_crf : astropy.table object
+    """
+
+    t_crf = Table.read(crf_file,
+                       format="ascii.fixed_width_no_header",
+                       names=("ivs_name", "ra_err", "dec_err", "ra_dec_corr",
+                              "mean_epoch", "beg_epoch", "end_epoch", "used_ses",
+                              "used_obs", "num_delrate"),
+                       col_starts=(1, 55, 66, 81, 93, 106, 119, 132, 137, 144),
+                       col_ends=(9, 65, 75, 87, 105, 118, 131, 136, 143, 150))
+
+    # Position
+    t_radec = Table.read(crf_file, format="ascii.fixed_width_no_header",
+                         names=["ra_dec"], col_starts=[19], col_ends=[54])
+
+    return t_crf, t_radec
+
+
+def read_opa_crf(crf_file):
+    """Read radio source positions in .crf file from OPA/AUS
+
+    Parameters
+    ----------
+    crf_file : string
+        the full path of .cat file
+
+    Return
+    ------
+    t_crf : astropy.table object
+    """
+
+    if not os.path.isfile(crf_file):
+        sys.exit(1)
+
+    t_crf = Table.read(crf_file, format="ascii",
+                       names=["ivs_name", "iers_name",
+                              "ra_h", "ra_m", "ra_s",
+                              "dec_d", "dec_m", "dec_s",
+                              "ra_err", "dec_err", "ra_dec_corr",
+                              "mean_epoch", "beg_epoch", "end_epoch",
+                              "used_ses", "used_obs", "num_delrate", "flag"],
+                       exclude_names=["ra_h", "ra_m", "ra_s",
+                                      "dec_d", "dec_m", "dec_s"])
+
+    # Position
+    t_radec = Table.read(crf_file, format="ascii.fixed_width_no_header",
+                         names=["ra_dec"], col_starts=[21], col_ends=[59])
+
+    return t_crf, t_radec
+
+
+def read_usn_crf(crf_file):
+    """Read radio source positions in .crf file from USNO
+
+    Parameters
+    ----------
+    crf_file : string
+        the full path of .cat file
+
+    Return
+    ------
+    t_crf : astropy.table object
+    """
+
+    if not os.path.isfile(crf_file):
+        sys.exit(1)
+
+    t_crf = Table.read(crf_file, data_start=6,
+                       format="ascii.fixed_width_no_header",
+                       names=("ivs_name", "ra_err", "dec_err", "ra_dec_corr",
+                              "mean_epoch", "beg_epoch", "end_epoch", "used_ses",
+                              "used_obs", "num_delrate"),
+                       col_starts=(9, 54, 65, 75, 82, 90, 98, 106, 112, 124),
+                       col_ends=(17, 64, 74, 81, 89, 97, 105, 111, 118, 125))
+
+    # Position
+    t_radec = Table.read(crf_file, data_start=6,
+                         format="ascii.fixed_width_no_header",
+                         names=["ra_dec"], col_starts=[18], col_ends=[53])
+
+    return t_crf, t_radec
+
+
+def read_crf(crf_file, analy_cen="OPA", drop_few_obs=False, nobs_lim=3, flate_err=False):
+    """Read radio source positions in .crf file
+
+    Parameters
+    ----------
+    crf_file : string
+        the full path of .cat file
+    analy_cen : string
+        abbreviation name of analysis center
+        asi: Space Geodesy Centre of the Italian Space Agency
+        aus: Geoscience Australia
+        opa: Paris Observatory, France
+        usn: Unites States Naval Observatory
     drop_few_obs : boolean
         flag to determine whether to remove sources with few observations
     nobs_lim : int
@@ -240,70 +384,32 @@ def read_crf(crf_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
             epoch of last observation (MJD)
     """
 
-    if not os.path.isfile(crf_file):
-        sys.exit()
+    if analy_cen in ["asi", "ASI"]:
+        t_crf, t_radec = read_asi_crf(crf_file)
+    elif analy_cen in ["aus", "AUS", "opa", "OPA"]:
+        t_crf, t_radec = read_opa_crf(crf_file)
+    elif analy_cen in ["usn", "USN"]:
+        t_crf, t_radec = read_usn_crf(crf_file)
+    else:
+        print("Undefined IVS analysis center")
+        os.exit(1)
 
-    # t_crf = Table.read(crf_file, format="ascii.fixed_width_no_header",
-    #                       names=["ivs_name", "iers_name",
-    #                              "ra_err", "dec_err", "ra_dec_corr",
-    #                              "mean_epoch", "beg_epoch", "end_epoch",
-    #                              "used_ses", "used_obs", "num_delrate", "flag"],
-    #                       col_starts=[0, 21, 64, 79, 90, 97,
-    #                                   105, 113, 121, 127, 134, 141],
-    #                       col_ends=[8, 59, 74, 88, 96, 104, 112, 120, 126, 133, 140, 144])
-
-    t_crf = Table.read(crf_file, format="ascii",
-                       names=["ivs_name", "iers_name",
-                              "ra_h", "ra_m", "ra_s",
-                              "dec_d", "dec_m", "dec_s",
-                              "ra_err", "dec_err", "ra_dec_corr",
-                              "mean_epoch", "beg_epoch", "end_epoch",
-                              "used_ses", "used_obs", "num_delrate", "flag"],
-                       exclude_names=["ra_h", "ra_m", "ra_s",
-                                      "dec_d", "dec_m", "dec_s",
-                                      "num_delrate"])
-
-    # Position
-    tradec = Table.read(crf_file, format="ascii.fixed_width_no_header",
-                        names=["ra_dec"], col_starts=[21], col_ends=[59])
-
-    radec = SkyCoord(tradec["ra_dec"], unit=(u.hourangle, u.deg))
-
-    racol = Column(radec.ra.deg, name="ra", unit=u.deg)
-    deccol = Column(radec.dec.deg, name="dec", unit=u.deg)
-
-    t_crf.add_columns([racol, deccol], indexes=[2, 2])
+    # RA and decl.
+    ra_dec = SkyCoord(t_radec["ra_dec"], unit=(u.hourangle, u.deg))
+    ra_col = Column(ra_dec.ra.deg, name="ra", unit=u.deg)
+    dec_col = Column(ra_dec.dec.deg, name="dec", unit=u.deg)
+    t_crf.add_columns([ra_col, dec_col], indexes=[1, 2])
 
     # Multipliy the formal error in R.A. by a factor of cos(Decl.)
-    factor = np.cos(radec.dec.radian)
-    t_crf["ra_err"] = t_crf["ra_err"] * factor * 15
+    factor = np.cos(ra_dec.dec.radian)
+    t_crf["ra_err"] = t_crf["ra_err"] * factor
 
     # Drop sources with fewer No. obs
     if drop_few_obs:
-        # NO. sources in the original solution
-        N0 = len(t_crf)
+        t_crf = drop_sou_with_few_obs(t_crf, nobs_lim)
 
-        # Remove source with 0 observation used in the solution
-        mask = (t_crf["used_obs"] >= nobs_lim)
-        t_crf = Table(t_crf[mask], masked=False)
-
-        # No. sources after elimination
-        N1 = len(t_crf)
-
-        print("There are {:d} sources in the original catalog, "
-              "{:d} ({:.0f}%) sources with #obs < {:.0f} dropped, leaving "
-              "{:d} sources in the present catalog.".format(
-                  N0, N0-N1, (N0-N1)/N0*100, nobs_lim, N1))
-
-    # Unit
-    t_crf["ra_err"].unit = u.arcsecond
-    t_crf["dec_err"].unit = u.arcsecond
-    t_crf["mean_epoch"].unit = cds.MJD
-    t_crf["beg_epoch"].unit = cds.MJD
-    t_crf["end_epoch"].unit = cds.MJD
-
-    t_crf["ra_err"].convert_unit_to(u.mas)
-    t_crf["dec_err"].convert_unit_to(u.mas)
+    # Add unit information
+    t_crf = add_unit(t_crf, "crf")
 
     # Inflate the formal error
     if flate_err:
@@ -317,6 +423,15 @@ def read_crf(crf_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
     # Add the semi-major axis of error ellipse to the table
     t_crf.add_column(pos_err, name="pos_err", index=7)
     # t_crf["pos_err"].unit = u.mas
+
+    # Add IERS and ICRF designations of source names
+    if analy_cen in ["asi", "ASI", "usn", "USN"]:
+        t_souname = get_souname()
+        t_crf = join(t_souname, t_crf, keys="ivs_name", join_type="right")
+
+        # Fill the empty filed of IERS name by the IVS name
+        for i in t_crf["iers_name"].mask.nonzero()[0]:
+            t_crf[i]["iers_name"] = t_crf[i]["ivs_name"]
 
     return t_crf
 
@@ -389,28 +504,10 @@ def read_cat(cat_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
                          "used_ses", "used_obs", "mean_epoch", "beg_epoch", "end_epoch"])
 
     if drop_few_obs:
-        # NO. sources in the original solution
-        N0 = len(t_cat)
+        t_cat = drop_sou_with_few_obs(t_cat, nobs_lim)
 
-        # Remove source with 0 observation used in the solution
-        mask = (t_cat["used_obs"] >= nobs_lim)
-        t_cat = Table(t_cat[mask], masked=False)
-
-        # No. sources after elimination
-        N1 = len(t_cat)
-
-        print("There are {:d} sources in the original catalog, "
-              "{:d} ({:.0f}%) sources with #obs < {:.0f} dropped, leaving "
-              "{:d} sources in the present catalog.".format(
-                  N0, N0-N1, (N0-N1)/N0*100, nobs_lim, N1))
     # unit
-    t_cat["ra"].unit = u.deg
-    t_cat["dec"].unit = u.deg
-    t_cat["ra_err"].unit = u.mas
-    t_cat["dec_err"].unit = u.mas
-    t_cat["mean_epoch"].unit = cds.MJD
-    t_cat["beg_epoch"].unit = cds.MJD
-    t_cat["end_epoch"].unit = cds.MJD
+    t_cat = add_unit(t_cat, "cat")
 
     # Inflate the formal error
     if flate_err:
@@ -429,6 +526,6 @@ def read_cat(cat_file, drop_few_obs=False, nobs_lim=3, flate_err=False):
 
 
 # -------------------------------- MAIN --------------------------------
-if __name__ == '__main__':
+if __name__ == "__main__":
     read_sou(sys.argv[1])
 # --------------------------------- END --------------------------------
